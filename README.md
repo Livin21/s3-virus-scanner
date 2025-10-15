@@ -1,18 +1,36 @@
-## S3 Virus Scanner (CDK + ClamAV)
+# S3 Virus Scanner
 
-Serverless, event-driven malware scanning for S3 using ClamAV. Files added or updated in a source S3 bucket are scanned asynchronously via SQS → Lambda. Clean objects are tagged; infected objects are deleted or quarantined (if a quarantine bucket is provided). Every scan is recorded in DynamoDB, and an optional webhook receives results.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-### Architecture
+Serverless, event-driven malware scanning for AWS S3 using ClamAV. Automatically scan files uploaded to S3 buckets, tag clean files, quarantine or delete infected files, and maintain an audit trail.
 
-- S3 (existing bucket) → S3 Event Notifications → SQS
-- SQS → Lambda (Docker image with ClamAV)
-- Lambda → DynamoDB (audit)
-- Lambda → S3 tag clean objects; delete or move to quarantine for infected
-- Lambda → optional webhook URL (POST JSON results)
+## 🚀 Features
 
-Additional definitions cache path:
-- EventBridge Schedule → Updater Lambda (Docker with freshclam) → S3 Definitions Cache
-- Scanner Lambda downloads definitions tarball from cache (no freshclam on hot path)
+- **Automated Scanning**: Automatically scan files when uploaded to S3 using event-driven architecture
+- **ClamAV Integration**: Industry-standard open-source antivirus engine
+- **Efficient Definitions Management**: ClamAV virus definitions cached in S3 and updated automatically
+- **Flexible Handling**: Tag clean files, quarantine or delete infected files
+- **Audit Trail**: All scan results stored in DynamoDB for compliance and tracking
+- **Webhook Support**: Optional webhook notifications for scan results
+- **Serverless**: No servers to manage, scales automatically
+- **Cost Effective**: Pay only for what you use with Lambda and on-demand DynamoDB
+- **Infrastructure as Code**: Complete AWS CDK deployment
+
+## 📋 Table of Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [Operations](#operations)
+- [How It Works](#how-it-works)
+- [Cost Considerations](#cost-considerations)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+## 🏗️ Architecture
 
 ```
 S3 (ObjectCreated) ──▶ SQS ──▶ Lambda(ClamAV) ──▶ DynamoDB (audit)
@@ -25,80 +43,306 @@ S3 (ObjectCreated) ──▶ SQS ──▶ Lambda(ClamAV) ──▶ DynamoDB (au
 
 EventBridge (rate) ──▶ Updater Lambda ──▶ S3 (ClamAV DB cache)
                                  ▲                 │
-                                 └────── Scanner Lambda pulls db tar.gz
+                                 └────── Scanner Lambda pulls definitions
 ```
 
-### Implementation Plan
+### Components
 
-1) Infrastructure (CDK)
-- Import existing source bucket by ARN from environment
-- Create SQS queue (+ DLQ) and route S3 ObjectCreated events to it (S3 Notification → SQS)
-- Create DynamoDB table (on-demand) for audit records
-- Build Scanner Lambda from Docker image containing clamscan; add SQS event source
-- Create S3 Definitions Cache bucket
-- Build Updater Lambda (Docker with freshclam) + EventBridge Schedule (e.g., rate(4 hours)) to publish `clamav/defs/db.tar.gz`
-- Permissions: Scanner needs S3 read/write+tagging, DDB write, SQS consume, read from defs cache; Updater needs write to defs cache
+1. **S3 Source Bucket**: Your existing S3 bucket to be scanned
+2. **SQS Queue**: Receives S3 event notifications with dead-letter queue for failed messages
+3. **Scanner Lambda**: Docker container with ClamAV that scans files
+4. **Definitions Cache**: S3 bucket storing ClamAV virus definitions
+5. **Updater Lambda**: Periodically updates virus definitions using freshclam
+6. **DynamoDB Table**: Stores audit records of all scans
+7. **Quarantine Bucket** (optional): Stores infected files for investigation
+8. **Webhook** (optional): Receives POST notifications of scan results
 
-2) Lambda runtime (Node.js in container)
-- Scanner: On init, download definitions tarball from S3 cache into `/tmp/clamav` (extract); fallback to `freshclam` only if cache unavailable
-- For each S3 object event: download object to `/tmp`, scan with `clamscan`
-- Clean: merge+write object tags (scan-status=clean, scannedAt, engine)
-- Infected: delete or copy to quarantine then delete original; add minimal tags to quarantined copy
-- Emit audit record to DynamoDB; POST results to webhook if configured
-- Return partial batch failures for SQS to avoid reprocessing successes
+## 📦 Prerequisites
 
-3) Documentation & Ops
-- Document required env vars, deploy steps, limits, and operational tips (timeouts, memory, NAT for freshclam)
+- **AWS Account** with appropriate permissions
+- **Node.js** 18.x or later
+- **AWS CDK** 2.x (`npm install -g aws-cdk`)
+- **Docker** installed and running (for building Lambda container images)
+- **AWS CLI** configured with credentials
 
-### Configuration (environment)
+### IAM Permissions Required
 
-Required at deploy (CDK synth/deploy time):
-- `SOURCE_BUCKET_ARN` (string): ARN of the S3 bucket to scan.
+The deploying user/role needs permissions to:
+- Create/manage Lambda functions
+- Create/manage S3 buckets and notifications
+- Create/manage SQS queues
+- Create/manage DynamoDB tables
+- Create/manage IAM roles and policies
+- Create/manage EventBridge rules
 
-Optional at deploy:
-- `QUARANTINE_BUCKET_ARN` (string): ARN of a bucket to receive infected objects.
-- `WEBHOOK_URL` (string): HTTPS URL to receive POSTed scan results.
-- `ENVIRONMENT` (string): Environment name for naming/tagging (e.g., dev, prod).
+## 🚀 Quick Start
 
-Provisioned environment (Lambda):
-- `DDB_TABLE_NAME` (string): Name of the audit table (set by CDK).
-- `QUARANTINE_BUCKET_NAME` (string, optional): Name of quarantine bucket.
-- `WEBHOOK_URL` (string, optional): Passed through from deploy env.
-- `ACCOUNT_ID`, `REGION`, `ENVIRONMENT`: Passed by CDK for naming/observability.
+### 1. Clone the Repository
 
-### Deploy
-
-1. Install dependencies
+```bash
+git clone https://github.com/yourusername/s3_virus_scanner.git
+cd s3_virus_scanner
 ```
+
+### 2. Install Dependencies
+
+```bash
 npm ci
 ```
 
-2. Create .env from example and fill values
-```
-cp .env.example .env
-# edit .env and set SOURCE_BUCKET_ARN, optional QUARANTINE_BUCKET_ARN, WEBHOOK_URL
-# Optionally set ENVIRONMENT, ACCOUNT_ID, REGION (otherwise CDK_DEFAULT_* are used)
-```
+### 3. Configure Environment
 
-3. Synthesize and deploy
-```
-npx cdk synth
-npx cdk deploy
+```bash
+cp env.example .env
 ```
 
-### Operations & Notes
+Edit `.env` and set your configuration:
 
-- The Lambda container installs ClamAV and fetches virus definitions on cold start into `/tmp/clamav`. This requires outbound internet. Do not place the function in a private subnet without NAT.
-- The function memory (≈3 GB), timeout (≈15 min), and ephemeral storage (≈2 GB) are configured to support large objects. Adjust if your files are small.
-- Object tagging merges existing tags up to S3’s limit (10 tags). If you already use many tags, consider replacing or reducing tag keys.
-- Quarantine: If provided, infected objects are copied to the quarantine bucket with the same key and then deleted from the source. If not provided, infected objects are deleted from the source.
-- SQS DLQ is configured for repeated failures. Investigate DLQ messages (e.g., persistent freshclam or permission issues).
+```bash
+# Required
+SOURCE_BUCKET_ARN=arn:aws:s3:::your-bucket-name
 
-### Useful CDK commands
+# Optional
+QUARANTINE_BUCKET_ARN=arn:aws:s3:::your-quarantine-bucket-name
+WEBHOOK_URL=https://your-webhook-endpoint.com/scan-results
+ENVIRONMENT=prod
+```
 
-- `npm run build`   compile typescript to js
-- `npm run watch`   watch for changes and compile
-- `npm run test`    perform the jest unit tests
-- `npx cdk deploy`  deploy this stack to your default AWS account/region
-- `npx cdk diff`    compare deployed stack with current state
-- `npx cdk synth`   emits the synthesized CloudFormation template
+### 4. Bootstrap CDK (First Time Only)
+
+```bash
+cdk bootstrap
+```
+
+### 5. Deploy
+
+```bash
+cdk deploy
+```
+
+Review the changes and confirm the deployment.
+
+## ⚙️ Configuration
+
+### Required Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SOURCE_BUCKET_ARN` | ARN of the S3 bucket to scan | `arn:aws:s3:::my-uploads-bucket` |
+
+### Optional Environment Variables
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `QUARANTINE_BUCKET_ARN` | ARN of bucket for infected files | - | `arn:aws:s3:::my-quarantine-bucket` |
+| `WEBHOOK_URL` | HTTPS URL for scan result notifications | - | `https://api.example.com/webhook` |
+| `ENVIRONMENT` | Environment name for resource naming | `dev` | `prod`, `staging` |
+| `ACCOUNT_ID` | AWS Account ID | CDK default | `123456789012` |
+| `REGION` | AWS Region | CDK default | `us-east-1` |
+
+### Webhook Payload Format
+
+When configured, the webhook receives POST requests with the following JSON payload:
+
+```json
+{
+  "id": "uuid",
+  "bucket": "bucket-name",
+  "key": "path/to/file.pdf",
+  "scannedAt": "2025-10-15T12:34:56.789Z",
+  "status": "clean|infected|error",
+  "signature": "Win.Test.EICAR_HDB-1" // only if infected
+}
+```
+
+## 🚢 Deployment
+
+### CDK Commands
+
+```bash
+# Compile TypeScript
+npm run build
+
+# Watch for changes
+npm run watch
+
+# Run tests
+npm run test
+
+# Synthesize CloudFormation template
+cdk synth
+
+# Compare deployed stack with current state
+cdk diff
+
+# Deploy to AWS
+cdk deploy
+
+# Destroy the stack
+cdk destroy
+```
+
+### Deployment Notes
+
+- **First deployment** takes longer due to Docker image builds
+- **Lambda containers** are automatically built and pushed to ECR
+- **S3 notifications** are configured automatically using custom resources
+- **Virus definitions** are downloaded on first scanner invocation
+
+## 🔧 Operations
+
+### Lambda Configuration
+
+- **Scanner Memory**: 3 GB (supports large files)
+- **Scanner Timeout**: 15 minutes
+- **Scanner Ephemeral Storage**: 2 GB (for virus definitions)
+- **Updater Memory**: 2 GB
+- **Updater Timeout**: 15 minutes
+- **Updater Schedule**: Every 4 hours
+
+### Network Requirements
+
+⚠️ **Important**: The Lambda functions require outbound internet access for:
+- Scanner: Downloading virus definitions from S3 (or fallback to freshclam)
+- Updater: Downloading virus definitions from ClamAV mirrors
+
+**Options**:
+1. Deploy Lambda in public subnet (not recommended for production)
+2. Deploy Lambda in private subnet with NAT Gateway (recommended)
+3. Use S3 definitions cache to minimize internet dependency
+
+### Monitoring and Troubleshooting
+
+#### CloudWatch Logs
+
+Lambda functions log to CloudWatch Logs:
+- Scanner: `/aws/lambda/clamav-scanner-{environment}-{account}-{region}`
+- Updater: `/aws/lambda/clamav-defs-updater-{environment}-{account}-{region}`
+
+#### Dead Letter Queue
+
+Failed messages are sent to the DLQ after 5 retry attempts. Investigate DLQ messages for:
+- Permission errors
+- Timeout issues
+- freshclam failures
+- File size exceeding limits
+
+#### DynamoDB Audit Table
+
+Query the audit table to:
+- View scan history
+- Track infection rates
+- Compliance reporting
+
+### File Handling
+
+#### Clean Files
+- Original file remains in source bucket
+- Tags added: `scan-status=clean`, `scannedAt`, `engine=ClamAV`
+
+#### Infected Files
+- **With quarantine bucket**: File copied to quarantine, then deleted from source
+- **Without quarantine bucket**: File deleted from source
+- Not tagged (file is removed)
+
+#### Scan Errors
+- File remains in source bucket
+- Message retried (up to 5 times)
+- Eventually moved to DLQ
+
+### Limits
+
+- **Max file size**: 2 GB (configurable in scanner code)
+- **S3 tags limit**: 10 tags per object (ensure you have available tag slots)
+- **Lambda ephemeral storage**: 2 GB (for virus definitions)
+- **SQS message retention**: 4 days
+- **DLQ retention**: 14 days
+
+## 🔍 How It Works
+
+### Scanning Flow
+
+1. File uploaded to S3 bucket triggers S3 Event Notification
+2. S3 sends message to SQS queue
+3. Lambda function triggered by SQS message
+4. Lambda downloads file to `/tmp`
+5. Lambda scans file with ClamAV using local virus definitions
+6. Based on scan result:
+   - **Clean**: Add tags to S3 object
+   - **Infected**: Quarantine/delete object
+   - **Error**: Retry (or send to DLQ)
+7. Write audit record to DynamoDB
+8. Send webhook notification (if configured)
+
+### Virus Definitions Management
+
+1. **Updater Lambda** runs every 4 hours via EventBridge Schedule
+2. Downloads latest virus definitions using `freshclam`
+3. Uploads definitions (CVD files) to S3 definitions cache
+4. **Scanner Lambda** downloads definitions from S3 cache on cold start
+5. Falls back to `freshclam` if cache is unavailable (requires internet)
+
+## 💰 Cost Considerations
+
+Estimated monthly costs for scanning 10,000 files/month (average 5 MB each):
+
+| Service | Cost | Notes |
+|---------|------|-------|
+| Lambda (Scanner) | ~$15 | 3 GB memory, ~30s per scan |
+| Lambda (Updater) | <$1 | Runs every 4 hours |
+| S3 (Definitions) | <$1 | ~150 MB storage |
+| DynamoDB | ~$1.25 | On-demand, 10K writes/month |
+| SQS | <$1 | 10K messages |
+| Data Transfer | Variable | Depends on file downloads |
+
+**Total**: ~$18-25/month for 10,000 file scans
+
+💡 Tips to reduce costs:
+- Use S3 definitions cache to avoid freshclam on every cold start
+- Adjust Lambda memory based on your file sizes
+- Use S3 Lifecycle policies on quarantine bucket
+- Consider provisioned capacity for DynamoDB at higher volumes
+
+## 🔒 Security
+
+### Best Practices
+
+1. **Use quarantine bucket** to investigate infected files safely
+2. **Enable S3 bucket encryption** (enabled by default for definitions bucket)
+3. **Restrict IAM permissions** to least privilege
+4. **Enable AWS CloudTrail** for audit logging
+5. **Review CloudWatch Logs** regularly
+6. **Monitor DLQ** for persistent failures
+7. **Update virus definitions** frequently (configured to run every 4 hours)
+8. **Use VPC endpoints** for S3 access from Lambda (optional)
+9. **Enable versioning** on source bucket for recovery
+
+### Reporting Security Issues
+
+Please see [SECURITY.md](SECURITY.md) for information on reporting security vulnerabilities.
+
+## 🤝 Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on:
+- How to submit issues
+- How to submit pull requests
+- Code style guidelines
+- Development setup
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [ClamAV](https://www.clamav.net/) - Open source antivirus engine
+- [AWS CDK](https://aws.amazon.com/cdk/) - Infrastructure as Code framework
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/yourusername/s3_virus_scanner/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/yourusername/s3_virus_scanner/discussions)
+
+---
+
+Made with ❤️ by the open source community
