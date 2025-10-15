@@ -139,28 +139,182 @@ function scanFile(filePath) {
 }
 
 async function tagObject(bucket, key, newTags) {
-  let existing;
-  try {
-    existing = await s3.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: key }));
-  } catch (e) {
-    existing = { TagSet: [] };
+  const maxRetries = 3;
+  let attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
+      // Get existing tags
+      let existing;
+      try {
+        existing = await s3.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: key }));
+      } catch (e) {
+        // Object doesn't exist - it may have been deleted (e.g., infected and quarantined)
+        if (e.name === 'NoSuchKey') {
+          log('Object no longer exists, skipping tagging', { bucket, key });
+          return; // Not an error - object was deleted
+        }
+        // For other errors, assume no existing tags
+        log('Failed to get existing tags, assuming empty', { bucket, key, error: e.message });
+        existing = { TagSet: [] };
+      }
+      
+      // Merge tags
+      const tagMap = new Map((existing.TagSet || []).map(t => [t.Key, t.Value]));
+      for (const [k, v] of Object.entries(newTags)) tagMap.set(k, String(v));
+      const TagSet = Array.from(tagMap.entries()).map(([Key, Value]) => ({ Key, Value }));
+      
+      // Put tags with retry
+      await s3.send(new PutObjectTaggingCommand({ Bucket: bucket, Key: key, Tagging: { TagSet } }));
+      log('Successfully tagged object', { bucket, key, tags: newTags });
+      return; // Success
+      
+    } catch (e) {
+      attempt++;
+      
+      // Check if error is retryable
+      const isRetryable = e.name !== 'NoSuchKey' && 
+                          e.name !== 'AccessDenied' && 
+                          e.name !== 'InvalidArgument';
+      
+      if (!isRetryable || attempt >= maxRetries) {
+        if (e.name === 'NoSuchKey') {
+          log('Object deleted before tagging, skipping', { bucket, key });
+          return; // Not a failure - object was deleted
+        }
+        log('Failed to tag object after retries', { 
+          bucket, 
+          key, 
+          error: e.message, 
+          errorType: e.name,
+          attempts: attempt 
+        });
+        throw e; // Re-throw for non-retryable errors
+      }
+      
+      // Exponential backoff: 1s, 2s, 4s
+      const backoffMs = 1000 * Math.pow(2, attempt - 1);
+      log('Retrying tag operation', { 
+        bucket, 
+        key, 
+        attempt, 
+        maxRetries, 
+        backoffMs,
+        error: e.message 
+      });
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
   }
-  const tagMap = new Map((existing.TagSet || []).map(t => [t.Key, t.Value]));
-  for (const [k, v] of Object.entries(newTags)) tagMap.set(k, String(v));
-  const TagSet = Array.from(tagMap.entries()).map(([Key, Value]) => ({ Key, Value }));
-  await s3.send(new PutObjectTaggingCommand({ Bucket: bucket, Key: key, Tagging: { TagSet } }));
 }
 
 async function quarantineOrDelete(srcBucket, key) {
+  const maxRetries = 3;
+  
+  // Copy to quarantine if configured
   if (QUARANTINE_BUCKET_NAME) {
     const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-    await s3.send(new CopyObjectCommand({ Bucket: QUARANTINE_BUCKET_NAME, Key: key, CopySource: `${srcBucket}/${encodedKey}` }));
+    let attempt = 0;
+    
+    while (attempt < maxRetries) {
+      try {
+        await s3.send(new CopyObjectCommand({ 
+          Bucket: QUARANTINE_BUCKET_NAME, 
+          Key: key, 
+          CopySource: `${srcBucket}/${encodedKey}` 
+        }));
+        log('Copied to quarantine', { srcBucket, key, quarantineBucket: QUARANTINE_BUCKET_NAME });
+        break; // Success
+      } catch (e) {
+        attempt++;
+        if (attempt >= maxRetries) {
+          log('Failed to copy to quarantine, will still delete from source', { 
+            srcBucket, 
+            key, 
+            error: e.message,
+            attempts: attempt 
+          });
+          // Continue to delete even if quarantine copy fails
+          break;
+        }
+        const backoffMs = 1000 * Math.pow(2, attempt - 1);
+        log('Retrying quarantine copy', { attempt, maxRetries, backoffMs, error: e.message });
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+    }
   }
-  await s3.send(new DeleteObjectCommand({ Bucket: srcBucket, Key: key }));
+  
+  // Delete from source with retry
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: srcBucket, Key: key }));
+      log('Deleted infected object from source', { srcBucket, key });
+      return; // Success
+    } catch (e) {
+      attempt++;
+      
+      // NoSuchKey means already deleted - not an error
+      if (e.name === 'NoSuchKey') {
+        log('Object already deleted', { srcBucket, key });
+        return;
+      }
+      
+      if (attempt >= maxRetries) {
+        log('Failed to delete infected object after retries', { 
+          srcBucket, 
+          key, 
+          error: e.message,
+          attempts: attempt 
+        });
+        throw e; // Critical - infected file remains in source bucket
+      }
+      
+      const backoffMs = 1000 * Math.pow(2, attempt - 1);
+      log('Retrying delete operation', { attempt, maxRetries, backoffMs, error: e.message });
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
+  }
 }
 
 async function auditWrite(record) {
-  await ddb.send(new PutCommand({ TableName: DDB_TABLE_NAME, Item: record }));
+  const maxRetries = 3;
+  let attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
+      await ddb.send(new PutCommand({ TableName: DDB_TABLE_NAME, Item: record }));
+      return; // Success
+    } catch (e) {
+      attempt++;
+      
+      // Check if error is retryable (throttling, network issues)
+      const isRetryable = e.name === 'ProvisionedThroughputExceededException' ||
+                          e.name === 'RequestLimitExceeded' ||
+                          e.name === 'ServiceUnavailable' ||
+                          e.name === 'InternalServerError' ||
+                          e.$metadata?.httpStatusCode >= 500;
+      
+      if (!isRetryable || attempt >= maxRetries) {
+        log('Failed to write audit record after retries', { 
+          recordId: record.id,
+          error: e.message,
+          errorType: e.name,
+          attempts: attempt 
+        });
+        throw e; // Re-throw to trigger SQS retry
+      }
+      
+      const backoffMs = 1000 * Math.pow(2, attempt - 1);
+      log('Retrying audit write', { 
+        recordId: record.id,
+        attempt, 
+        maxRetries, 
+        backoffMs,
+        error: e.message 
+      });
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
+  }
 }
 
 async function postWebhook(payload) {

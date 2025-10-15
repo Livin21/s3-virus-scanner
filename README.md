@@ -160,14 +160,10 @@ When configured, the webhook receives POST requests with the following JSON payl
 ### CDK Commands
 
 ```bash
-# Compile TypeScript
-npm run build
-
-# Watch for changes
-npm run watch
-
-# Run tests
-npm run test
+# Install Dependencies
+npm install
+cd lambda/des-updater && npm install
+cd lambda/scanner && npm install
 
 # Synthesize CloudFormation template
 cdk synth
