@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Serverless, event-driven malware scanning for AWS S3 using ClamAV. Automatically scan files uploaded to S3 buckets, tag clean files, quarantine or delete infected files, and maintain an audit trail.
+Serverless, event-driven malware scanning for AWS S3 using [ClamAV](https://www.clamav.net/). Automatically scan files uploaded to S3 buckets, tag clean files, quarantine or delete infected files, and maintain an audit trail.
 
 ## 🚀 Features
 

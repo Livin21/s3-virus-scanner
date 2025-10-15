@@ -27,7 +27,15 @@ export class S3VirusScannerStack extends cdk.Stack {
 
     // S3 Buckets (import source, optionally import quarantine)
     const sourceBucket = s3.Bucket.fromBucketArn(this, 'SourceBucket', sourceBucketArn);
-    const sourceBucketName = sourceBucketArn.split(':::')[1];
+    
+    // Parse bucket name from ARN using CDK's Arn utilities
+    const parsedArn = cdk.Arn.split(sourceBucketArn, cdk.ArnFormat.SLASH_RESOURCE_NAME);
+    const sourceBucketName = parsedArn.resourceName || parsedArn.resource;
+    
+    if (!sourceBucketName) {
+      throw new Error(`Invalid SOURCE_BUCKET_ARN format: ${sourceBucketArn}. Expected format: arn:aws:s3:::bucket-name`);
+    }
+    
     // S3 Notification -> SQS for imported bucket using custom resource + queue policy
     const quarantineBucket = quarantineBucketArn
       ? s3.Bucket.fromBucketArn(this, 'QuarantineBucket', quarantineBucketArn)
