@@ -1,7 +1,14 @@
 *.js
+!lambda/**/*.js
 !jest.config.js
 *.d.ts
 node_modules
+.DS_Store
+lambda/**/node_modules
+lambda/**/dist
+lambda/**/.npm-cache
+cdk.out
+.env
 
 # CDK asset staging directory
 .cdk.staging
