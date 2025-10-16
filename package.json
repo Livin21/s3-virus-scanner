@@ -8,6 +8,10 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:cdk": "jest test/s3_virus_scanner.test.ts",
+    "test:lambda": "jest test/scanner-lambda.test.js",
     "cdk": "cdk"
   },
   "devDependencies": {
