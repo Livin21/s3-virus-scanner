@@ -142,18 +142,68 @@ Review the changes and confirm the deployment.
 
 ### Webhook Payload Format
 
-When configured, the webhook receives POST requests with the following JSON payload:
+When configured, the webhook uses the [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) envelope:
 
 ```json
 {
-  "id": "uuid",
-  "bucket": "bucket-name",
-  "key": "path/to/file.pdf",
-  "scannedAt": "2025-10-15T12:34:56.789Z",
-  "status": "clean|infected|error",
-  "signature": "Win.Test.EICAR_HDB-1" // only if infected
+  "id": "28fb6e8f-8841-42db-98f1-6e6e1a2db468",
+  "source": "s3-virus-scanner",
+  "event": "clamav.scan.clean",
+  "created_at": "2025-10-15T12:34:56.789Z",
+  "data": {
+    "id": "28fb6e8f-8841-42db-98f1-6e6e1a2db468",
+    "bucket": "example-input-bucket",
+    "key": "uploads/report.pdf",
+    "scannedAt": "2025-10-15T12:34:56.789Z",
+    "status": "clean",
+    "signature": "" // malware signature (present only when status === "infected")
+  }
 }
 ```
+
+Each delivery includes Standard Webhooks headers:
+
+| Header | Description |
+|--------|-------------|
+| `Webhook-Id` | Unique identifier for the delivery (matches `data.id`) |
+| `Webhook-Source` | Source identifier (defaults to `s3-virus-scanner`, configurable via `WEBHOOK_SOURCE`) |
+| `Webhook-Event` | Event name (`clamav.scan.clean`, `clamav.scan.infected`, or `clamav.scan.error`) |
+| `Webhook-Timestamp` | UNIX epoch (seconds) when the message was generated |
+| `Webhook-Version` | Spec version (`1`) |
+| `Webhook-Signature` | HMAC-SHA256 signature `v1=<hex>` computed with `WEBHOOK_SECRET` over `<timestamp>.<body>` |
+
+### Verifying the Webhook Signature
+
+You can use the official [`standardwebhooks` JavaScript library](https://github.com/standard-webhooks/standard-webhooks/blob/main/libraries/javascript/README.md) to verify requests:
+
+```ts
+import { Webhook } from 'standardwebhooks';
+
+// WEBHOOK_SECRET is the same shared secret configured for the scanner Lambda.
+// The Standard Webhooks library expects the secret to be base64-encoded.
+const base64Secret = Buffer.from(process.env.WEBHOOK_SECRET!, 'utf8').toString('base64');
+const wh = new Webhook(base64Secret);
+
+export function verify(requestBody: string, headers: Record<string, string>) {
+  try {
+    // verify throws if the signature or timestamp is invalid
+    const event = wh.verify(requestBody, headers);
+
+    // event contains { id, source, event, created_at, data }
+    return event;
+  } catch (err) {
+    throw new Error('Invalid webhook signature');
+  }
+}
+```
+
+`requestBody` must be the raw string payload (before JSON parsing) and `headers` must include the Standard Webhooks headers (`Webhook-Id`, `Webhook-Source`, `Webhook-Timestamp`, `Webhook-Event`, `Webhook-Version`, `Webhook-Signature`).
+
+Reject requests when:
+
+- `Webhook-Timestamp` is outside an acceptable skew (e.g., ±5 minutes)
+- `Webhook-Source` is not the expected value
+- `Webhook-Signature` verification fails
 
 ## 🚢 Deployment
 
@@ -162,8 +212,9 @@ When configured, the webhook receives POST requests with the following JSON payl
 ```bash
 # Install Dependencies
 npm install
-cd lambda/des-updater && npm install
-cd lambda/scanner && npm install
+
+# Run Unit Tests (uses standard-webhooks spec-compliant headers)
+npm run test
 
 # Synthesize CloudFormation template
 cdk synth

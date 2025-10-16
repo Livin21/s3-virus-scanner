@@ -12,6 +12,7 @@ import os from 'os';
 import { spawnSync } from 'child_process';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
+import { createHmac } from 'crypto';
 
 const pipelineAsync = promisify(pipeline);
 
@@ -22,6 +23,9 @@ const sqs = new SQSClient({});
 const DDB_TABLE_NAME = process.env.DDB_TABLE_NAME;
 const QUARANTINE_BUCKET_NAME = process.env.QUARANTINE_BUCKET_NAME || '';
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+const WEBHOOK_SOURCE = process.env.WEBHOOK_SOURCE || 's3-virus-scanner';
+const STANDARD_WEBHOOK_VERSION = '1';
 const DEFS_BUCKET_NAME = process.env.DEFS_BUCKET_NAME || '';
 const DEFS_KEY = process.env.DEFS_KEY || 'clamav/defs/db.tar.gz';
 
@@ -317,9 +321,48 @@ async function auditWrite(record) {
   }
 }
 
-async function postWebhook(payload) {
+export function buildStandardWebhookMessage(audit) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const event = `clamav.scan.${audit.status}`;
+  const body = {
+    id: audit.id,
+    source: WEBHOOK_SOURCE,
+    event,
+    created_at: audit.scannedAt,
+    data: audit,
+  };
+  const bodyString = JSON.stringify(body);
+  const signature = createHmac('sha256', WEBHOOK_SECRET)
+    .update(`${timestamp}.${bodyString}`)
+    .digest('hex');
+
+  return {
+    bodyString,
+    headers: {
+      'Content-Type': 'application/json',
+      'Webhook-Id': audit.id,
+      'Webhook-Source': WEBHOOK_SOURCE,
+      'Webhook-Timestamp': timestamp,
+      'Webhook-Event': event,
+      'Webhook-Version': STANDARD_WEBHOOK_VERSION,
+      'Webhook-Signature': `v1=${signature}`,
+    },
+  };
+}
+
+export async function postWebhook(audit, axiosClient = axios) {
   if (!WEBHOOK_URL) return;
-  try { await axios.post(WEBHOOK_URL, payload, { timeout: 2000 }); } catch (e) { console.warn('Webhook failed:', e?.message || e); }
+  if (!WEBHOOK_SECRET) {
+    console.warn('WEBHOOK_SECRET not configured; skipping webhook dispatch to remain spec-compliant');
+    return;
+  }
+
+  try {
+    const { bodyString, headers } = buildStandardWebhookMessage(audit);
+    await axiosClient.post(WEBHOOK_URL, bodyString, { timeout: 2000, headers });
+  } catch (e) {
+    console.warn('Webhook failed:', e?.message || e);
+  }
 }
 
 export const handler = async (event) => {

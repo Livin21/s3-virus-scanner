@@ -7,11 +7,11 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "test:cdk": "jest test/s3_virus_scanner.test.ts",
-    "test:lambda": "jest test/scanner-lambda.test.js",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --coverage",
+    "test:cdk": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js test/s3_virus_scanner.test.ts",
+    "test:lambda": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js test/scanner-lambda.test.js",
     "cdk": "cdk"
   },
   "devDependencies": {
@@ -26,6 +26,7 @@
   "dependencies": {
     "aws-cdk-lib": "2.215.0",
     "constructs": "^10.0.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "axios": "^1.7.7"
   }
 }
